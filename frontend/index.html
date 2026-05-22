@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>BirdEye — Geospatial Vision System</title>
+  <meta name="description" content="Real-time object detection and geospatial tracking on any flat reference image. Upload a map or floorplan, connect a camera, and watch objects tracked in bird's-eye view." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+
+<!-- ══════════════════════════════════════════════════════════ TOP BAR ════ -->
+<header id="topbar">
+  <div class="topbar-left">
+    <div class="logo">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <circle cx="12" cy="12" r="3"/>
+        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+      </svg>
+      <span class="logo-text">BirdEye</span>
+    </div>
+  </div>
+
+  <div class="topbar-center">
+    <!-- Init status badge -->
+    <div class="status-badge" id="status-badge" data-status="idle">
+      <span class="status-dot"></span>
+      <span class="status-label" id="status-label">IDLE</span>
+    </div>
+
+    <!-- Live metrics -->
+    <div class="metric-group">
+      <div class="metric" title="Processing FPS">
+        <span class="metric-icon">⚡</span>
+        <span class="metric-value mono" id="fps-display">0.0</span>
+        <span class="metric-unit">fps</span>
+      </div>
+      <div class="metric" title="Active tracks">
+        <span class="metric-icon">◎</span>
+        <span class="metric-value mono" id="track-count">0</span>
+        <span class="metric-unit">tracks</span>
+      </div>
+      <div class="metric" title="Detections this frame">
+        <span class="metric-icon">▣</span>
+        <span class="metric-value mono" id="det-count">0</span>
+        <span class="metric-unit">dets</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="topbar-right">
+    <button id="btn-reset" class="btn btn-ghost btn-sm" title="Reset homography and tracks">
+      ↺ Reset
+    </button>
+    <div class="connection-indicator" id="ws-indicator" title="WebSocket connection">
+      <span class="conn-dot"></span>
+      <span class="conn-label">Disconnected</span>
+    </div>
+  </div>
+</header>
+
+<!-- ════════════════════════════════════════════════════════ MAIN LAYOUT ════ -->
+<main id="main-layout">
+
+  <!-- ── LEFT PANEL: Controls + Camera ──────────────────────────────────── -->
+  <aside id="left-panel">
+
+    <!-- Step 1: Reference Image -->
+    <section class="panel-section" id="section-reference">
+      <div class="section-header">
+        <span class="step-badge">01</span>
+        <h2>Reference Image</h2>
+      </div>
+      <p class="section-desc">Upload any flat image — satellite, floorplan, blueprint, or photo.</p>
+      <div class="upload-zone" id="ref-upload-zone">
+        <input type="file" id="ref-file-input" accept="image/*" hidden />
+        <div class="upload-icon">
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+            <path d="M3 9l4-4 4 4 4-6 4 8"/>
+            <circle cx="8" cy="8" r="1" fill="currentColor"/>
+          </svg>
+        </div>
+        <span class="upload-label">Click or drag an image</span>
+        <span class="upload-hint" id="ref-upload-hint">No image loaded</span>
+      </div>
+      <div class="ref-preview-wrap" id="ref-preview-wrap" style="display:none">
+        <img id="ref-preview-thumb" alt="Reference" />
+        <button class="btn-icon btn-remove" id="btn-remove-ref" title="Remove">✕</button>
+      </div>
+    </section>
+
+    <!-- Step 2: Camera -->
+    <section class="panel-section" id="section-camera">
+      <div class="section-header">
+        <span class="step-badge">02</span>
+        <h2>Camera</h2>
+      </div>
+      <p class="section-desc">Connect any webcam or USB camera.</p>
+      <div class="camera-controls">
+        <select id="camera-select" class="select-input" disabled>
+          <option value="">— Select camera —</option>
+        </select>
+        <button id="btn-camera-refresh" class="btn btn-ghost btn-sm" title="Refresh camera list">↻</button>
+      </div>
+      <div class="camera-preview-wrap">
+        <video id="camera-video" autoplay muted playsinline></video>
+        <canvas id="camera-canvas" aria-label="Camera feed with detection overlays"></canvas>
+        <div class="camera-overlay-label" id="cam-overlay-label">No Camera</div>
+      </div>
+      <div class="camera-btn-row">
+        <button id="btn-camera-connect" class="btn btn-primary btn-sm">Connect</button>
+        <button id="btn-camera-stop" class="btn btn-ghost btn-sm" disabled>Stop</button>
+      </div>
+
+      <!-- Frame rate control -->
+      <div class="slider-row">
+        <label for="fps-slider">Send rate</label>
+        <input type="range" id="fps-slider" min="1" max="30" value="15" />
+        <span class="mono" id="fps-slider-val">15 fps</span>
+      </div>
+    </section>
+
+    <!-- Step 3: Calibration -->
+    <section class="panel-section" id="section-init">
+      <div class="section-header">
+        <span class="step-badge">03</span>
+        <h2>Calibration</h2>
+      </div>
+      <p class="section-desc">Compute the homography matrix that maps camera pixels → reference image.</p>
+
+      <div class="init-btn-group">
+        <button id="btn-auto-init" class="btn btn-accent" disabled>
+          <span class="btn-icon-prefix">✦</span>
+          Auto-Initialize
+        </button>
+        <button id="btn-manual-init" class="btn btn-ghost" disabled>
+          ✎ Manual (4-pt)
+        </button>
+      </div>
+
+      <div class="init-status-box" id="init-status-box" style="display:none">
+        <div class="init-status-row">
+          <span class="init-method mono" id="init-method-label">—</span>
+          <span class="init-inliers" id="init-inliers-label"></span>
+        </div>
+        <div class="init-error-msg" id="init-error-msg" style="display:none"></div>
+      </div>
+    </section>
+
+    <!-- Track list -->
+    <section class="panel-section" id="section-tracks">
+      <div class="section-header">
+        <span class="step-badge">04</span>
+        <h2>Live Tracks</h2>
+      </div>
+      <div id="track-list" class="track-list">
+        <div class="track-empty">No active tracks</div>
+      </div>
+    </section>
+
+  </aside>
+
+  <!-- ── RIGHT PANEL: Reference Image Canvas ────────────────────────────── -->
+  <section id="ref-panel">
+    <div class="ref-canvas-wrap" id="ref-canvas-wrap">
+      <canvas id="ref-canvas" aria-label="Reference image with projected object tracks"></canvas>
+
+      <!-- Empty state -->
+      <div class="ref-empty-state" id="ref-empty-state">
+        <div class="empty-icon">
+          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+            <path d="M3 9l4-4 4 4 4-6 4 8"/>
+            <rect x="3" y="3" width="18" height="18" rx="2"/>
+          </svg>
+        </div>
+        <p>Upload a reference image to begin</p>
+      </div>
+
+      <!-- Canvas top-right corner controls -->
+      <div class="ref-canvas-controls">
+        <button id="btn-ref-zoom-in"  class="btn-icon-small" title="Zoom in">+</button>
+        <button id="btn-ref-zoom-out" class="btn-icon-small" title="Zoom out">−</button>
+        <button id="btn-ref-zoom-fit" class="btn-icon-small" title="Fit to view">⊡</button>
+      </div>
+
+      <!-- Ref image info bar -->
+      <div class="ref-info-bar" id="ref-info-bar" style="display:none">
+        <span id="ref-info-size" class="mono"></span>
+        <span class="separator">·</span>
+        <span id="ref-info-method" class="mono"></span>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<!-- ════════════════════════════════════════════════ CALIBRATION MODAL ════ -->
+<div id="calibration-modal" class="modal-overlay" style="display:none" aria-modal="true" role="dialog">
+  <div class="modal-box modal-wide">
+    <div class="modal-header">
+      <h3>Manual Calibration — Click 4+ Corresponding Points</h3>
+      <button class="btn-icon" id="btn-calib-close" aria-label="Close">✕</button>
+    </div>
+    <p class="modal-desc">
+      Click a point on the <strong>left (camera)</strong> image, then the matching point on the <strong>right (reference)</strong> image.
+      Repeat for at least <strong>4 pairs</strong>, then click <em>Compute H</em>.
+    </p>
+
+    <div class="calib-pair-progress" id="calib-pair-progress">
+      <span id="calib-pair-count">0 pairs</span>
+      <div class="pair-dots" id="calib-pair-dots"></div>
+    </div>
+
+    <div class="calib-canvas-row">
+      <div class="calib-panel">
+        <div class="calib-panel-label">Camera Snapshot</div>
+        <canvas id="calib-cam-canvas" class="calib-canvas"></canvas>
+      </div>
+      <div class="calib-arrow">→</div>
+      <div class="calib-panel">
+        <div class="calib-panel-label">Reference Image</div>
+        <canvas id="calib-ref-canvas" class="calib-canvas"></canvas>
+      </div>
+    </div>
+
+    <div class="modal-footer">
+      <div class="calib-state-hint" id="calib-state-hint">Click a point on the camera image first</div>
+      <div class="modal-footer-btns">
+        <button id="btn-calib-undo" class="btn btn-ghost btn-sm" disabled>↩ Undo</button>
+        <button id="btn-calib-clear" class="btn btn-ghost btn-sm">✕ Clear</button>
+        <button id="btn-calib-compute" class="btn btn-accent" disabled>Compute H</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══════════════════════════════════════════════════ TOAST CONTAINER ════ -->
+<div id="toast-container" aria-live="polite"></div>
+
+<!-- ═══════════════════════════════════════════════════════════ SCRIPTS ════ -->
+<script src="js/ws.js"></script>
+<script src="js/camera.js"></script>
+<script src="js/renderer.js"></script>
+<script src="js/calibration.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>
