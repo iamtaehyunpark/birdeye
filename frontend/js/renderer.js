@@ -76,6 +76,20 @@ class CamRenderer {
   constructor(canvas) {
     this.canvas = canvas;
     this.ctx    = canvas.getContext('2d');
+    this.detections = [];
+    this.staticDetections = [];
+  }
+
+  /** Cache detections to draw them on every animation frame */
+  setDetections(detections, staticDetections) {
+    this.detections = detections || [];
+    this.staticDetections = staticDetections || [];
+  }
+
+  /** Render cached overlays */
+  draw() {
+    this.drawOverlays(this.detections);
+    this.drawStaticOverlays(this.staticDetections);
   }
 
   /**

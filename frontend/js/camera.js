@@ -37,24 +37,39 @@ class CameraManager {
   async start(deviceId = null) {
     await this.stop();
 
-    const constraints = {
-      video: deviceId
-        ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
-        : { width: { ideal: 1280 }, height: { ideal: 720 } }
-    };
+    if (deviceId === '__mock__') {
+      this.video.srcObject = null;
+      this.video.src = "/api/mock-video";
+      this.video.loop = true;
+      this.video.muted = true;
+      await this.video.play();
+      this.stream = null;
+    } else {
+      this.video.src = '';
+      const constraints = {
+        video: deviceId
+          ? { deviceId: { exact: deviceId }, width: { ideal: 1280 }, height: { ideal: 720 } }
+          : { width: { ideal: 1280 }, height: { ideal: 720 } }
+      };
 
-    this.stream = await navigator.mediaDevices.getUserMedia(constraints);
-    this.video.srcObject = this.stream;
-    await this.video.play();
+      this.stream = await navigator.mediaDevices.getUserMedia(constraints);
+      this.video.srcObject = this.stream;
+      await this.video.play();
+    }
 
     this.video.style.opacity = '0'; // video element hidden — we draw to canvas
     if (this.overlayLabel) this.overlayLabel.style.display = 'none';
 
     // Sync canvas size to video
-    this.video.addEventListener('loadedmetadata', () => {
-      this.canvas.width  = this.video.videoWidth;
-      this.canvas.height = this.video.videoHeight;
-    }, { once: true });
+    const syncSize = () => {
+      this.canvas.width  = this.video.videoWidth || 1280;
+      this.canvas.height = this.video.videoHeight || 720;
+    };
+    if (this.video.videoWidth) {
+      syncSize();
+    } else {
+      this.video.addEventListener('loadedmetadata', syncSize, { once: true });
+    }
 
     this.active = true;
     this._drawLoop();
@@ -71,6 +86,7 @@ class CameraManager {
       this.stream = null;
     }
     this.video.srcObject = null;
+    this.video.src = '';
     if (this.overlayLabel) this.overlayLabel.style.display = '';
     this.ctx.clearRect(0, 0, this.canvas.width, this.canvas.height);
   }
@@ -80,6 +96,9 @@ class CameraManager {
     if (!this.active) return;
     if (this.video.readyState >= 2) {
       this.ctx.drawImage(this.video, 0, 0, this.canvas.width, this.canvas.height);
+      if (this.onDrawFrame) {
+        this.onDrawFrame();
+      }
     }
     requestAnimationFrame(() => this._drawLoop());
   }
@@ -135,11 +154,17 @@ class CameraManager {
   // ── Private ────────────────────────────────────────────────────────────────
   _sendFrame() {
     if (!this._wsManager || !this._wsManager.connected) return;
-    if (!this.active || !this.video.readyState >= 2) return;
+    if (!this.active || this.video.readyState < 2) return;
 
-    const off = document.createElement('canvas');
-    off.width  = this.canvas.width;
-    off.height = this.canvas.height;
+    // Reuse the offscreen canvas across calls to avoid GC pressure
+    if (!this._offCanvas) {
+      this._offCanvas = document.createElement('canvas');
+    }
+    const off = this._offCanvas;
+    if (off.width !== this.canvas.width || off.height !== this.canvas.height) {
+      off.width  = this.canvas.width;
+      off.height = this.canvas.height;
+    }
     off.getContext('2d').drawImage(this.video, 0, 0, off.width, off.height);
 
     off.toBlob(blob => {

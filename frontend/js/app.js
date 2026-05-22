@@ -28,6 +28,10 @@ const camManager = new CameraManager(
 const camRenderer = new CamRenderer(document.getElementById('camera-canvas'));
 const refRenderer = new RefRenderer(document.getElementById('ref-canvas'));
 
+camManager.onDrawFrame = () => {
+  camRenderer.draw();
+};
+
 let calibManager = null;
 
 // ── App state ─────────────────────────────────────────────────────────────────
@@ -116,15 +120,9 @@ ws.on('message', (data) => {
     setInitStatus(data.init_status);
   }
 
-  // Overlay detections on camera canvas
-  // Moving objects (not in reference) — full colored boxes
-  if (data.detections?.length) {
-    camRenderer.drawOverlays(data.detections);
-  }
-  // Static objects (already in reference) — dim dashed outline
-  if (data.static_detections?.length) {
-    camRenderer.drawStaticOverlays(data.static_detections);
-  }
+  // Cache detections for continuous rendering inside camera's animation frame loop
+  camRenderer.setDetections(data.detections, data.static_detections);
+
   // Count only moving objects in the metric display
   document.getElementById('det-count').textContent = data.detections?.length ?? 0;
 
@@ -159,10 +157,55 @@ refInput.addEventListener('change', () => {
   if (refInput.files[0]) _uploadReference(refInput.files[0]);
 });
 
+document.getElementById('btn-load-mock').addEventListener('click', () => {
+  _loadMockScenario();
+});
+
 document.getElementById('btn-remove-ref').addEventListener('click', () => {
   _clearReferenceUI();
   fetch(`${API}/api/reset`, { method: 'POST' });
 });
+
+async function _loadMockScenario() {
+  try {
+    const res = await fetch(`${API}/api/init/mock-scenario`, { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.detail ?? 'Load mock scenario failed');
+
+    APP.hasRef      = true;
+    APP.refImageSrc = `${API}/api/reference-image?t=${Date.now()}`;
+
+    // Show thumbnail
+    const thumb = document.getElementById('ref-preview-thumb');
+    thumb.src   = APP.refImageSrc;
+    document.getElementById('ref-preview-wrap').style.display = '';
+    uploadZone.style.display = 'none';
+    const mockWrap = document.getElementById('mock-scenario-wrap');
+    if (mockWrap) mockWrap.style.display = 'none';
+
+    // Load into ref renderer
+    refRenderer.loadImage(APP.refImageSrc);
+    document.getElementById('ref-empty-state').style.display = 'none';
+
+    // Show ref info bar
+    const bar = document.getElementById('ref-info-bar');
+    bar.style.display = '';
+    document.getElementById('ref-info-size').textContent = `${data.width} × ${data.height}`;
+
+    if (data.homography_loaded) {
+      // Pre-computed H was found — system is immediately ready to track
+      setInitStatus('done', { method: 'mock_precomputed', n_inliers: 4 });
+      toast(`Mock scenario ready — H pre-loaded (${data.width}×${data.height})`, 'success', 5000);
+    } else {
+      // No pre-computed H — user must calibrate before tracking
+      setInitStatus('idle');
+      _updateButtonStates();
+      toast(`Mock scenario loaded (${data.width}×${data.height}) — calibrate to begin tracking`, 'info');
+    }
+  } catch (err) {
+    toast(`Failed to load mock scenario: ${err.message}`, 'error');
+  }
+}
 
 async function _uploadReference(file) {
   const fd = new FormData();
@@ -183,6 +226,8 @@ async function _uploadReference(file) {
     thumb.src   = URL.createObjectURL(file);
     document.getElementById('ref-preview-wrap').style.display = '';
     uploadZone.style.display = 'none';
+    const mockWrap = document.getElementById('mock-scenario-wrap');
+    if (mockWrap) mockWrap.style.display = 'none';
 
     // Load into ref renderer
     refRenderer.loadImage(APP.refImageSrc);
@@ -209,6 +254,8 @@ function _clearReferenceUI() {
   document.getElementById('ref-preview-wrap').style.display = 'none';
   uploadZone.style.display = '';
   uploadZone.querySelector('.upload-hint').textContent = 'No image loaded';
+  const mockWrap = document.getElementById('mock-scenario-wrap');
+  if (mockWrap) mockWrap.style.display = '';
   document.getElementById('ref-empty-state').style.display = '';
   document.getElementById('ref-info-bar').style.display = 'none';
   setInitStatus('idle');
@@ -224,16 +271,31 @@ async function _populateCameras() {
   try {
     const devices = await camManager.enumerateCameras();
     camSelect.innerHTML = '<option value="">— Select camera —</option>';
+    
+    // Add mock option
+    const mockOpt = document.createElement('option');
+    mockOpt.value = '__mock__';
+    mockOpt.text = '🎥 Mock Video Feed (Simulated Runway)';
+    camSelect.appendChild(mockOpt);
+
     devices.forEach(d => {
       const opt   = document.createElement('option');
       opt.value   = d.deviceId;
       opt.text    = d.label || `Camera ${camSelect.options.length}`;
       camSelect.appendChild(opt);
     });
-    camSelect.disabled = devices.length === 0;
-    if (devices.length === 1) camSelect.value = devices[0].deviceId;
+    
+    camSelect.disabled = false;
+    camSelect.value = '__mock__';
   } catch (err) {
-    toast(`Camera enumeration failed: ${err.message}`, 'error');
+    camSelect.innerHTML = '<option value="">— Select camera —</option>';
+    const mockOpt = document.createElement('option');
+    mockOpt.value = '__mock__';
+    mockOpt.text = '🎥 Mock Video Feed (Simulated Runway)';
+    camSelect.appendChild(mockOpt);
+    camSelect.disabled = false;
+    camSelect.value = '__mock__';
+    toast(`Camera enumeration failed: ${err.message}. Mock feed is still available.`, 'warning');
   }
 }
 

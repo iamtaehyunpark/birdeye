@@ -65,7 +65,7 @@ class BackgroundDifferencer:
         self.dilate_iter             = dilate_iter
         self.region_foreground_ratio = region_foreground_ratio
 
-        self._ref_gray: Optional[np.ndarray] = None   # blurred gray, camera space
+        self._ref_bgr_blurred: Optional[np.ndarray] = None  # blurred BGR, camera space
         self._ref_bgr:  Optional[np.ndarray] = None   # for visualization
         self._open_kernel:   Optional[np.ndarray] = None
         self._dilate_kernel: Optional[np.ndarray] = None
@@ -73,7 +73,7 @@ class BackgroundDifferencer:
     # ── Setup ─────────────────────────────────────────────────────────────────
 
     def is_ready(self) -> bool:
-        return self._ref_gray is not None
+        return self._ref_bgr_blurred is not None
 
     def setup(
         self,
@@ -84,7 +84,7 @@ class BackgroundDifferencer:
     ) -> None:
         """
         Warp the reference image into camera perspective and pre-compute the
-        blurred grayscale background template.
+        blurred BGR background template.
 
         Args:
             ref_bgr: Reference image (BGR, any resolution)
@@ -98,12 +98,13 @@ class BackgroundDifferencer:
         warped = cv2.warpPerspective(ref_bgr, H_inv, (cam_w, cam_h))
         self._ref_bgr = warped
 
-        gray = cv2.cvtColor(warped, cv2.COLOR_BGR2GRAY)
         if self.blur_ksize > 1:
-            gray = cv2.GaussianBlur(
-                gray, (self.blur_ksize, self.blur_ksize), 0
+            bgr_blurred = cv2.GaussianBlur(
+                warped, (self.blur_ksize, self.blur_ksize), 0
             )
-        self._ref_gray = gray
+        else:
+            bgr_blurred = warped.copy()
+        self._ref_bgr_blurred = bgr_blurred
 
         # Pre-build morphological kernels
         ks_open   = self.morph_open_ksize
@@ -122,7 +123,7 @@ class BackgroundDifferencer:
 
     def invalidate(self) -> None:
         """Call when H or reference image changes so setup() re-runs."""
-        self._ref_gray = None
+        self._ref_bgr_blurred = None
         self._ref_bgr  = None
 
     # ── Core pipeline ─────────────────────────────────────────────────────────
@@ -134,18 +135,21 @@ class BackgroundDifferencer:
         Returns:
             mask: uint8 (0 = background/static, 255 = foreground/moving)
         """
-        if self._ref_gray is None:
+        if self._ref_bgr_blurred is None:
             # Not set up — treat whole frame as foreground (don't suppress anything)
             return np.full(camera_frame.shape[:2], 255, dtype=np.uint8)
 
-        cam_gray = cv2.cvtColor(camera_frame, cv2.COLOR_BGR2GRAY)
         if self.blur_ksize > 1:
-            cam_gray = cv2.GaussianBlur(
-                cam_gray, (self.blur_ksize, self.blur_ksize), 0
+            cam_bgr = cv2.GaussianBlur(
+                camera_frame, (self.blur_ksize, self.blur_ksize), 0
             )
+        else:
+            cam_bgr = camera_frame.copy()
 
-        # |camera - warped_ref| → high where scene differs from reference
-        diff = cv2.absdiff(cam_gray, self._ref_gray)
+        # |camera - warped_ref| in BGR space
+        diff_bgr = cv2.absdiff(cam_bgr, self._ref_bgr_blurred)
+        # Take the maximum difference across any channel
+        diff = np.max(diff_bgr, axis=2)
 
         _, mask = cv2.threshold(
             diff, self.diff_threshold, 255, cv2.THRESH_BINARY

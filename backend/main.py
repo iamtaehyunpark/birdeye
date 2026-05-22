@@ -146,6 +146,90 @@ async def serve_reference():
     return FileResponse(path, media_type="image/jpeg")
 
 
+@app.post("/api/init/mock-scenario")
+async def init_mock_scenario():
+    """Load the generated mock reference map and pre-computed homography."""
+    mock_ref_path = UPLOAD_DIR / "mock_reference.jpg"
+    if not mock_ref_path.exists():
+        raise HTTPException(404, "Mock reference image not found. Run generate_mock_data.py first.")
+
+    img = cv2.imread(str(mock_ref_path))
+    if img is None:
+        raise HTTPException(500, "Failed to read mock reference image")
+
+    out_path = UPLOAD_DIR / "reference.jpg"
+    cv2.imwrite(str(out_path), img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+
+    h, w = img.shape[:2]
+
+    # Auto-load pre-computed homography if available
+    mock_h_path = UPLOAD_DIR / "mock_homography.npy"
+    H: Optional[np.ndarray] = None
+    init_info: Optional[dict] = None
+    if mock_h_path.exists():
+        try:
+            loaded = np.load(str(mock_h_path))
+            if loaded.shape == (3, 3):
+                H = loaded
+                init_info = {"method": "mock_precomputed", "n_inliers": 4, "n_pairs": 4}
+        except Exception as exc:
+            logger.warning(f"Could not load mock homography: {exc}")
+
+    with state.lock:
+        state.ref_image_path = str(out_path)
+        state.ref_image_size = (w, h)
+        state.H              = H
+        state.init_status    = "done" if H is not None else "idle"
+        state.init_error     = None
+        state.init_info      = init_info
+
+    tracker.reset()
+    bg_diff.invalidate()
+    logger.info(f"Mock reference image loaded: {w}×{h}, homography={'yes' if H is not None else 'no'}")
+    return {"status": "ok", "width": w, "height": h, "homography_loaded": H is not None}
+
+
+@app.post("/api/init/mock-homography")
+async def init_mock_homography():
+    """Load the pre-computed mock homography matrix into state."""
+    mock_h_path = UPLOAD_DIR / "mock_homography.npy"
+    if not mock_h_path.exists():
+        raise HTTPException(404, "mock_homography.npy not found. Run generate_mock_data.py first.")
+
+    try:
+        H = np.load(str(mock_h_path))
+        if H.shape != (3, 3):
+            raise ValueError(f"Expected 3×3, got {H.shape}")
+    except Exception as exc:
+        raise HTTPException(500, f"Failed to load homography: {exc}")
+
+    info = {"method": "mock_precomputed", "n_inliers": 4, "n_pairs": 4}
+    with state.lock:
+        state.H           = H
+        state.init_status = "done"
+        state.init_error  = None
+        state.init_info   = info
+
+    tracker.reset()
+    bg_diff.invalidate()
+    logger.info("Mock homography loaded via /api/init/mock-homography")
+    return {"status": "done", "info": info}
+
+
+@app.get("/api/mock-video")
+async def serve_mock_video():
+    """Serve the generated mock camera feed video."""
+    video_path = UPLOAD_DIR / "mock_camera.mp4"
+    if not video_path.exists():
+        video_path = UPLOAD_DIR / "mock_camera.avi"
+    if not video_path.exists():
+        raise HTTPException(404, "Mock camera video not found. Run generate_mock_data.py first.")
+    
+    media_type = "video/mp4" if video_path.suffix == ".mp4" else "video/avi"
+    return FileResponse(str(video_path), media_type=media_type)
+
+
+
 @app.post("/api/init/auto")
 async def init_auto(body: dict):
     """
@@ -324,6 +408,11 @@ async def ws_frames(ws: WebSocket):
 
             # ── Detect ────────────────────────────────────────────────────────
             raw_dets = await loop.run_in_executor(None, detector.detect, frame)
+
+            # Keep only vehicle classes to prevent false detections (e.g. sports ball, person, kite)
+            # from polluting the tracking visualization.
+            vehicle_classes = {"car", "truck", "bus", "motorcycle"}
+            raw_dets = [d for d in raw_dets if d["class_name"] in vehicle_classes]
 
             # ── Background mask ───────────────────────────────────────────────
             # Pixels that differ from warped reference = potential moving objects
